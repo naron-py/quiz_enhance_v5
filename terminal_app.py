@@ -6,9 +6,13 @@ import os
 from PIL import Image, ImageTk
 import tkinter as tk
 import pyautogui
+import mss
+pyautogui.PAUSE = 0
+pyautogui.MINIMUM_DURATION = 0
 import difflib
 import re
 from ocr_processor import OCRProcessor
+from config_manager import ConfigManager
 import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -30,6 +34,23 @@ from rich.text import Text
 from rich.box import Box, ROUNDED, SIMPLE
 console = Console()
 
+# Configuration file path
+CONFIG_FILE = 'config.json'
+config_manager = ConfigManager(CONFIG_FILE)
+config = config_manager.data
+
+# Set up logging based on configuration
+log_level_name = config.get('log_level', 'INFO').upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('terminal_app.log'),
+        logging.StreamHandler()
+    ]
+)
+
 # Try to import torch for GPU memory management
 try:
     import torch
@@ -44,19 +65,6 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('terminal_app.log'),
-        logging.StreamHandler()
-    ]
-)
-
-# Configuration file path
-CONFIG_FILE = 'config.json'
-
 # Global variables
 ocr_processor = None
 questions_df = None
@@ -65,7 +73,6 @@ recognized_text = {}
 best_match = None
 tfidf_vectorizer = None
 tfidf_matrix = None
-config = None
 timings = {}
 auto_click = False  # Whether to automatically click on the answer
 question_capture_count = 0 # New global counter for captured questions
@@ -81,69 +88,17 @@ debug_dir = Path('debug_images')
 debug_dir.mkdir(exist_ok=True)
 # --- Debug Directory end ---
 
-def load_config():
-    """Load configuration from file or create default if not exists"""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
-            # Set defaults for new fields if missing
-            if 'match_mode' not in config:
-                config['match_mode'] = 'Classic'
-            if 'show_processing_times' not in config:
-                config['show_processing_times'] = True
-            if 'auto_click' not in config:
-                config['auto_click'] = False
-            if 'show_ocr_answer_choices_terminal' not in config:
-                config['show_ocr_answer_choices_terminal'] = True
-            if 'capture_fullscreen_on_nomatch' not in config:
-                config['capture_fullscreen_on_nomatch'] = False
-            if 'filter_answer_choice_tags' not in config:
-                config['filter_answer_choice_tags'] = False
-            if 'save_all_captured_images' not in config:
-                config['save_all_captured_images'] = False
-            if 'active_database' not in config:
-                config['active_database'] = 'default'
-            if 'filter_selected_pattern' not in config:
-                config['filter_selected_pattern'] = True
-            return config
-    else:
-        default_config = {
-            'question_region': {'x': 115, 'y': 680, 'width': 680, 'height': 200},
-            'answer_regions': {
-                'A': {'x': 390, 'y': 880, 'width': 550, 'height': 90},
-                'B': {'x': 1040, 'y': 880, 'width': 550, 'height': 90},
-                'C': {'x': 390, 'y': 1000, 'width': 550, 'height': 90},
-                'D': {'x': 1040, 'y': 1000, 'width': 550, 'height': 90}
-            },
-            'match_mode': 'Classic',
-            'show_processing_times': True,
-            'auto_click': True,
-            'show_ocr_answer_choices_terminal': True,
-            'capture_fullscreen_on_nomatch': True,
-            'filter_answer_choice_tags': False,
-            'save_all_captured_images': False,  # Save fullscreen image for every capture
-            'active_database': 'default',  # default, magic, muggle, or all
-            'filter_selected_pattern': True  # Filter out "[number] selected" pattern
-        }
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(default_config, f, indent=4)
-        return default_config
-
-def save_config(new_config):
-    """Save configuration to file"""
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(new_config, f, indent=4)
-    global config
-    config = new_config
-    print("Configuration saved!")
-
 def capture_screen(region):
     """Capture a specific region of the screen"""
-    screenshot = pyautogui.screenshot(region=(
-        region['x'], region['y'], 
-        region['width'], region['height']
-    ))
-    return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    with mss.mss() as sct:
+        bbox = {
+            "left": region['x'],
+            "top": region['y'],
+            "width": region['width'],
+            "height": region['height']
+        }
+        screenshot = sct.grab(bbox)
+        return cv2.cvtColor(np.array(screenshot), cv2.COLOR_BGRA2BGR)
 
 def click_on_answer(region):
     """Click in the middle of the specified answer region"""
@@ -154,7 +109,6 @@ def click_on_answer(region):
         
         # Log the click attempt
         logging.info(f"Attempting to click at position: ({center_x}, {center_y})")
-        print(f"Attempting to click at position: ({center_x}, {center_y})")
         
         # Try different click methods based on available libraries
         click_success = False
@@ -171,34 +125,26 @@ def click_on_answer(region):
                 
                 # Log success
                 logging.info("Click performed using win32api")
-                print("Click performed using win32api")
                 click_success = True
             except Exception as e:
                 logging.error(f"Win32 click failed: {e}")
-                print(f"Win32 click failed: {e}")
         
         # Method 2: PyAutoGUI fallback
         if not click_success:
             try:
-                # Move instantly and click with minimal delay
-                pyautogui.moveTo(center_x, center_y, duration=0)
-                pyautogui.mouseDown(x=center_x, y=center_y, button='left')
-                time.sleep(0.01)
-                pyautogui.mouseUp(x=center_x, y=center_y, button='left')
-                
+                pyautogui.click(x=center_x, y=center_y)
+                time.sleep(0.01)  # Minimal delay for reliability
+
                 # Log success
                 logging.info("Click performed using pyautogui")
-                print("Click performed using pyautogui")
                 click_success = True
             except Exception as e:
                 logging.error(f"PyAutoGUI click failed: {e}")
-                print(f"PyAutoGUI click failed: {e}")
         
         # Return success status
         return click_success
     except Exception as e:
         logging.error(f"Error in click_on_answer: {e}")
-        print(f"Error in click_on_answer: {e}")
         return False
 
 def load_questions_data():
@@ -264,19 +210,19 @@ def switch_database(db_name):
     # Update config
     config['active_database'] = db_name.lower()
     active_database = db_name.lower()
-    save_config(config)
+    config_manager.data = config
+    config_manager.save()
     
     # Reload database and compute TF-IDF
-    print(f"Switching to {db_name} database...")
+    console.print(f"[cyan]Switching to {db_name} database...[/cyan]")
     questions_df = load_questions_data()
-    
+
     if questions_df is not None:
-        print(f"Loaded {len(questions_df)} questions from {db_name} database.")
+        console.print(f"[green]Loaded {len(questions_df)} questions from {db_name} database.[/green]")
         
         # Recompute TF-IDF Matrix
         try:
             tfidf_vectorizer, tfidf_matrix = compute_tfidf_matrix(questions_df)
-            print("TF-IDF matrix computed.")
             logging.info("TF-IDF matrix computed successfully.")
             return True
         except Exception as e:
@@ -444,7 +390,7 @@ def capture_and_save_fullscreen_on_nomatch():
         # Save the image
         cv2.imwrite(str(filename), fullscreen_img_np)
         logging.info(f"Saved full screen capture due to no match: {filename}")
-        print(f"No match found. Saved fullscreen capture: {filename}")
+        console.print(f"[yellow]No match found. Saved fullscreen capture: {filename}[/yellow]")
     except Exception as e:
         logging.error(f"Failed to capture/save fullscreen on no match: {e}", exc_info=True)
         console.print(f"[bold red]Error saving fullscreen capture:[/bold red] {e}")
@@ -784,7 +730,8 @@ def initialize():
     global config, ocr_processor, questions_df, tfidf_vectorizer, tfidf_matrix, auto_click
 
     # First, load the configuration
-    config = load_config()
+    config_manager.load()
+    config = config_manager.data
     
     # Set auto_click based on configuration
     auto_click = config.get('auto_click', False)
@@ -794,10 +741,8 @@ def initialize():
         from ocr_processor import OCRProcessor
         global ocr_processor
         ocr_processor = OCRProcessor()
-        print("OCR Processor initialized.")
         logging.info("OCR Processor initialized.")
     except Exception as e:
-        print(f"Error initializing OCR processor: {e}")
         logging.error(f"Error initializing OCR processor: {e}", exc_info=True)
     
     # Load questions data
@@ -807,16 +752,12 @@ def initialize():
         # Compute TF-IDF matrices for matching
         try:
             tfidf_vectorizer, tfidf_matrix = compute_tfidf_matrix(questions_df)
-            print(f"TF-IDF matrix computed with {len(questions_df)} questions.")
             logging.info(f"TF-IDF matrix computed with {len(questions_df)} questions.")
         except Exception as e:
-            print(f"Error computing TF-IDF matrix: {e}")
             logging.error(f"Error computing TF-IDF matrix: {e}", exc_info=True)
     else:
-        print("Warning: Failed to load questions data.")
         logging.warning("Failed to load questions data.")
     
-    print(f"Initialization complete. Active database: {active_database}")
     logging.info(f"Initialization complete. Active database: {active_database}")
 
 def show_config():
@@ -844,30 +785,31 @@ def set_config(args):
         
     # Check if the key exists at the top level
     if key not in config:
-         # Check if it's a nested key (e.g., question_region.x)
-         if '.' in key:
-             parts = key.split('.', 1)
-             main_key = parts[0]
-             nested_key = parts[1]
-             if main_key in config and isinstance(config[main_key], dict) and nested_key in config[main_key]:
-                  try:
-                     # Attempt to parse the value as JSON (int, float, bool, string)
-                     try:
-                         value = json.loads(value_str)
-                     except json.JSONDecodeError:
-                         value = value_str # Keep as string if not valid JSON
-                     
-                     # Set the nested value
-                     config[main_key][nested_key] = value
-                     save_config(config)
-                     print(f"Set {key} = {value}")
-                  except Exception as e:
-                     print(f"Error setting nested config value: {e}")
-             else:
-                 print(f"Error: Key '{key}' not found in configuration.")
-         else:
-             print(f"Error: Key '{key}' not found in configuration.")
-         return
+        # Check if it's a nested key (e.g., question_region.x)
+        if '.' in key:
+            parts = key.split('.', 1)
+            main_key = parts[0]
+            nested_key = parts[1]
+            if main_key in config and isinstance(config[main_key], dict) and nested_key in config[main_key]:
+                try:
+                    # Attempt to parse the value as JSON (int, float, bool, string)
+                    try:
+                        value = json.loads(value_str)
+                    except json.JSONDecodeError:
+                        value = value_str  # Keep as string if not valid JSON
+
+                    # Set the nested value
+                    config[main_key][nested_key] = value
+                    config_manager.data = config
+                    config_manager.save()
+                    console.print(f"[green]Set {key} = {value}[/green]")
+                except Exception as e:
+                    console.print(f"[bold red]Error setting nested config value:[/bold red] {e}")
+            else:
+                console.print(f"[bold red]Error: Key '{key}' not found in configuration.[/bold red]")
+        else:
+            console.print(f"[bold red]Error: Key '{key}' not found in configuration.[/bold red]")
+        return
 
     # Handle top-level key
     try:
@@ -888,24 +830,27 @@ def set_config(args):
              global auto_click
              auto_click = value
         config[key] = value
-        save_config(config)
-        print(f"Set {key} = {value}")
+        config_manager.data = config
+        config_manager.save()
+        console.print(f"[green]Set {key} = {value}[/green]")
     except Exception as e:
-        print(f"Error setting config value: {e}")
+        console.print(f"[bold red]Error setting config value:[/bold red] {e}")
 
 def toggle_auto_click():
     """Toggle auto click setting"""
     global auto_click, config
     auto_click = not auto_click
     config['auto_click'] = auto_click # Update config dict
-    save_config(config) # Save the updated config to file
+    config_manager.data = config
+    config_manager.save()
     print(f"Auto click {'enabled' if auto_click else 'disabled'}.")
 
 def toggle_filter_selected():
     """Toggle filter selected pattern setting"""
     global config
     config['filter_selected_pattern'] = not config.get('filter_selected_pattern', True)
-    save_config(config)
+    config_manager.data = config
+    config_manager.save()
     enabled_status = "enabled" if config['filter_selected_pattern'] else "disabled"
     console.print(f"[bold cyan]Filter '[number] selected' pattern {enabled_status}.[/bold cyan]")
     return config['filter_selected_pattern']
@@ -931,7 +876,8 @@ def configure_question_region():
         region = _select_region("Select QUESTION region")
         if region:
             config["question_region"] = region
-            save_config(config)
+            config_manager.data = config
+            config_manager.save()
             console.print("[bold green]Question region updated.[/bold green]")
     except Exception as e:
         cv2.destroyAllWindows()
@@ -946,7 +892,8 @@ def configure_answer_region(label: str):
         region = _select_region(f"Select answer region {label}")
         if region:
             config["answer_regions"][label] = region
-            save_config(config)
+            config_manager.data = config
+            config_manager.save()
             console.print(f"[bold green]Answer region {label} updated.[/bold green]")
     except Exception as e:
         cv2.destroyAllWindows()
@@ -965,7 +912,8 @@ def configure_all_regions():
             region = _select_region(f"Select answer region {label}")
             if region:
                 config["answer_regions"][label] = region
-        save_config(config)
+        config_manager.data = config
+        config_manager.save()
         console.print("[bold green]Regions updated and saved.[/bold green]")
     except Exception as e:
         cv2.destroyAllWindows()
@@ -1054,7 +1002,8 @@ def configure_regions_ui():
             config["question_region"] = regions["question_region"]
             for label in ["A", "B", "C", "D"]:
                 config["answer_regions"][label] = regions[label]
-            save_config(config)
+            config_manager.data = config
+            config_manager.save()
             console.print("[bold green]Regions updated and saved.[/bold green]")
         else:
             console.print("[yellow]Region configuration cancelled.[/yellow]")
@@ -1086,7 +1035,8 @@ def configure_regions():
         cv2.destroyWindow("Region Selector")
 
 
-        save_config(config)
+        config_manager.data = config
+        config_manager.save()
         console.print("[bold green]Regions updated and saved.[/bold green]")
     except Exception as e:
         cv2.destroyAllWindows()
@@ -1145,14 +1095,6 @@ def show_help():
     print(" autoclick      : Toggle auto-clicking the matched answer region.")
     print(" filterselected : Toggle filtering '[number] selected' pattern from answers.")
     print(" pos            : Configure question and answer regions via GUI.")
-    print(" configpos      : Alias for pos (legacy command).")
-    print(" posq           : Interactively set the QUESTION region.")
-    print(" posa           : Interactively set answer region A.")
-    print(" posb           : Interactively set answer region B.")
-    print(" posc           : Interactively set answer region C.")
-    print(" posd           : Interactively set answer region D.")
-    print(" posall         : Interactively set question and all answer regions.")
-    print(" configpos      : Interactively set question and answer regions.")
     print(" test           : Run the accuracy_evaluator.py script for batch testing.")
     print(" config         : Show current configuration.")
     print(" data <name>: Switch database. Options: default, magic, muggle, all")
@@ -1185,14 +1127,6 @@ if __name__ == "__main__":
     print("test           - Run the accuracy_evaluator.py script for batch testing")
     print("config         - Show current configuration")
     print("pos            - Configure question and answer regions via GUI")
-    print("configpos      - Alias for pos (legacy command)")
-    print("posq           - Interactively set the QUESTION region")
-    print("posa           - Interactively set answer region A")
-    print("posb           - Interactively set answer region B")
-    print("posc           - Interactively set answer region C")
-    print("posd           - Interactively set answer region D")
-    print("posall         - Interactively set question and all answer regions")
-    print("configpos      - Interactively set question and answer regions")
     print("data <name>    - Switch database options (default, magic, muggle, all)")
     print("set <key> <val> - Set configuration values")
     print("help           - Show complete help message")
@@ -1242,22 +1176,6 @@ if __name__ == "__main__":
                         toggle_filter_selected()
                     elif command == "pos":
                         configure_regions_ui()
-                    elif command == "configpos":
-                        configure_regions_ui()
-                    elif command == "posq":
-                        configure_question_region()
-                    elif command == "posa":
-                        configure_answer_region("A")
-                    elif command == "posb":
-                        configure_answer_region("B")
-                    elif command == "posc":
-                        configure_answer_region("C")
-                    elif command == "posd":
-                        configure_answer_region("D")
-                    elif command == "posall":
-                        configure_all_regions()
-                    elif command == "configpos":
-                        configure_regions()
                     elif command == "test":
                         run_accuracy_evaluator_script()
                     elif command == "capture" or command == "f2":
