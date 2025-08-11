@@ -757,6 +757,7 @@ def initialize():
             logging.error(f"Error computing TF-IDF matrix: {e}", exc_info=True)
         # Provide user feedback regardless of log level
         console.print(
+            f"[bold green]Reload successful: Loaded [{active_database.capitalize()}] {len(questions_df)} questions.[/bold green]"
             f"[bold green]Reload successful: Loaded {len(questions_df)} questions.[/bold green]"
         )
     else:
