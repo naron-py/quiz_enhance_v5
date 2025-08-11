@@ -22,12 +22,6 @@ Start the interactive assistant:
 python terminal_app.py
 ```
 
-A small CLI is also available:
-```bash
-python cli.py capture   # capture once
-python cli.py config    # show configuration
-```
-
 Configuration is stored in `config.json`. Edit it manually or use commands in the interactive shell.
 
 Set the `log_level` field in `config.json` to control console logging. Use values like `"WARNING"` or `"ERROR"` to suppress
