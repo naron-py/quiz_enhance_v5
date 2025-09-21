@@ -90,6 +90,8 @@ spam_capture_mode = False  # Flag for controlling continuous spam capture mode
 spam_capture_thread = None  # Thread for running spam capture
 last_auto_clicked_question = None  # Tracks last question text that triggered auto click
 last_auto_clicked_choice = None  # Tracks last answer choice that triggered auto click
+last_processed_question = None  # Tracks the last OCR question we processed
+last_processed_choice = None  # Tracks the last answer choice processed for caching
 
 # For thread safety
 capture_lock = threading.Lock()
@@ -101,10 +103,13 @@ debug_dir.mkdir(exist_ok=True)
 
 def reset_last_auto_clicked_pair():
     """Reset the stored question/choice pair used for auto-click tracking."""
-    global last_auto_clicked_question, last_auto_clicked_choice
+    global last_auto_clicked_question, last_auto_clicked_choice, \
+        last_processed_question, last_processed_choice
     last_auto_clicked_question = None
     last_auto_clicked_choice = None
-    logging.debug("Reset last auto-clicked question and choice.")
+    last_processed_question = None
+    last_processed_choice = None
+    logging.debug("Reset last auto-clicked question, choice, and processed cache.")
 
 def capture_screen(region):
     """Capture a specific region of the screen using the shared MSS instance."""
@@ -485,7 +490,9 @@ def filter_selected_pattern(text):
 def capture_and_process():
     """Main function to capture, process, and find match"""
     start_total_time = time.time()
-    global captured_images, recognized_text, best_match, question_capture_count, last_auto_clicked_question, last_auto_clicked_choice
+    global captured_images, recognized_text, best_match, question_capture_count, \
+        last_auto_clicked_question, last_auto_clicked_choice, last_processed_question, \
+        last_processed_choice
     timings.clear() # Reset timings for this cycle
     
     with capture_lock:
@@ -607,10 +614,32 @@ def capture_and_process():
         # 3. Find Best Match
         match_start = time.time()
         ocr_question_text = recognized_text.get('question')
-        if ocr_question_text and questions_df is not None and tfidf_vectorizer is not None:
+        current_question = ocr_question_text or ""
+        skip_matching_due_to_cache = False
+
+        if (
+            current_question
+            and last_processed_question == current_question
+            and last_processed_choice is not None
+            and last_auto_clicked_question == current_question
+            and last_auto_clicked_choice == last_processed_choice
+        ):
+            skip_matching_due_to_cache = True
+            logging.debug(
+                "Skipping matching for previously processed question '%s' with choice '%s'.",
+                current_question,
+                last_processed_choice,
+            )
+
+        if skip_matching_due_to_cache:
+            match_end = time.time()
+            timings['matching'] = match_end - match_start
+        elif ocr_question_text and questions_df is not None and tfidf_vectorizer is not None:
+            last_processed_question = current_question
+            last_processed_choice = None
             # Using the new function to find all matching questions
             matching_entries = find_all_matching_questions(ocr_question_text, questions_df, tfidf_vectorizer, tfidf_matrix)
-            
+
             if matching_entries:
                 # First try exact match with answers
                 ANSWER_SIMILARITY_THRESHOLD = 0.7
@@ -684,6 +713,12 @@ def capture_and_process():
                             last_auto_clicked_question = current_question
                             last_auto_clicked_choice = best_match_choice
                             timings['auto_click'] = time.time() - click_start
+                        if (
+                            auto_click
+                            and last_auto_clicked_question == current_question
+                            and last_auto_clicked_choice == best_match_choice
+                        ):
+                            last_processed_choice = best_match_choice
 
                     # Create a match result panel
                     match_panel = Panel(
@@ -836,7 +871,9 @@ def toggle_spam_capture_mode():
     
     # Toggle the mode
     spam_capture_mode = not spam_capture_mode
-    
+
+    reset_last_auto_clicked_pair()
+
     if spam_capture_mode:
         # Start the spam capture thread if it doesn't exist or is not alive
         if spam_capture_thread is None or not spam_capture_thread.is_alive():
@@ -845,7 +882,6 @@ def toggle_spam_capture_mode():
         console.print("[bold green]Spam capture mode enabled[/bold green]")
     else:
         console.print("[bold yellow]Spam capture mode disabled[/bold yellow]")
-        reset_last_auto_clicked_pair()
 
     return spam_capture_mode
 
