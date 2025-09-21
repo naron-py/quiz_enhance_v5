@@ -556,15 +556,17 @@ def capture_and_process():
             
             if matching_entries:
                 # First try exact match with answers
+                ANSWER_SIMILARITY_THRESHOLD = 0.7
                 best_match_entry = None
                 best_match_choice = None
                 best_match_similarity = -1.0
-                
+                match_short_circuited = False
+
                 for entry in matching_entries:
                     match_q = entry['question']
                     match_a = entry['answer']
                     score = entry['score']
-                    
+
                     # Try to find matching answer choice for this potential answer
                     for label in ['A', 'B', 'C', 'D']:
                         ocr_answer_text = recognized_text.get(label)
@@ -574,17 +576,28 @@ def capture_and_process():
                                 best_match_similarity = similarity
                                 best_match_choice = label
                                 best_match_entry = entry
-                
-                # Use a reasonable threshold
-                ANSWER_SIMILARITY_THRESHOLD = 0.7
-                
+                            if similarity >= ANSWER_SIMILARITY_THRESHOLD:
+                                match_short_circuited = True
+                                logging.info(
+                                    "Answer similarity %.3f met or exceeded threshold %.3f for choice %s; short-circuiting remaining comparisons.",
+                                    similarity,
+                                    ANSWER_SIMILARITY_THRESHOLD,
+                                    label,
+                                )
+                                break
+                    if match_short_circuited:
+                        break
+
                 if best_match_entry and best_match_choice and best_match_similarity >= ANSWER_SIMILARITY_THRESHOLD:
                     # Found a good match both for question and answer
                     match_q = best_match_entry['question']
                     match_a = best_match_entry['answer']
                     score = best_match_entry['score']
 
-                    logging.info(f"Match found: DB Q='{match_q}', DB A='{match_a}', Score={score:.3f}, Choice={best_match_choice}, Similarity={best_match_similarity:.3f}")
+                    short_circuit_note = " [short-circuited after threshold match]" if match_short_circuited else ""
+                    logging.info(
+                        f"Match found: DB Q='{match_q}', DB A='{match_a}', Score={score:.3f}, Choice={best_match_choice}, Similarity={best_match_similarity:.3f}{short_circuit_note}"
+                    )
 
                     auto_click_console_message = None
 
