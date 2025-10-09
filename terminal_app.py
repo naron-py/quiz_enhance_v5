@@ -861,6 +861,9 @@ def on_press(key):
         elif key == keyboard.Key.f3: # F3 now reloads instead of F4
             print("\n--- F3 Pressed: Reloading Configuration ---")
             initialize()
+        elif key == keyboard.Key.f9:  # F9 toggles auto-click
+            print("\n--- F9 Pressed: Toggling Auto Click ---")
+            toggle_auto_click()
         elif key == keyboard.Key.f10: # F10 toggles spam capture mode
             print("\n--- F10 Pressed: Toggling Spam Capture Mode ---")
             toggle_spam_capture_mode()
@@ -1296,7 +1299,7 @@ def show_help():
     """Display help message"""
     print("\n--- Available Commands ---")
     print(" capture / F2   : Capture screen regions, OCR, and find match.")
-    print(" autoclick      : Toggle auto-clicking the matched answer region.")
+    print(" autoclick / F9 : Toggle auto-clicking the matched answer region.")
     print(" autoscan / F10 : Toggle continuous spam capture mode.")
     print(" filterselected : Toggle filtering '[number] selected' pattern from answers.")
     print(" pos            : Configure question and answer regions via GUI.")
@@ -1326,12 +1329,14 @@ if __name__ == "__main__":
     print("--- Keyboard Shortcuts ---")
     print("F2  - Capture and process quiz")
     print("F3  - Reload configuration")
+    print("F9  - Toggle auto click")
     print("F10 - Toggle spam capture mode")
     
     print("\n--- Available Commands ---")
     print("test           - Run the accuracy_evaluator.py script for batch testing")
     print("config         - Show current configuration")
     print("pos            - Configure question and answer regions via GUI")
+    print("autoclick      - Toggle auto click (same as F9)")
     print("autoscan       - Toggle continuous spam capture mode (same as F10)")
     print("data <name>    - Switch database options (default, magic, muggle, all)")
     print("set <key> <val> - Set configuration values")
